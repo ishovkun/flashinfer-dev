@@ -11,8 +11,8 @@ import torch
 
 import flashinfer
 
-from .triton_reference.selective_state_update import selective_state_update_triton
-from .test_utils import create_test_inputs, clone_preserving_strides
+from .selective_state_update_triton import selective_state_update_triton
+from .utils import create_test_inputs, clone_preserving_strides
 
 
 class TestSelectiveStateUpdateMTP:
