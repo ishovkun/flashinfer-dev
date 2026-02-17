@@ -961,13 +961,15 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t
   else {
     // SM100+ (Blackwell and newer) uses horizontal producer-consumer kernel
     auto kernel_launcher = [&]<int DIM, int DSTATE>() {
-      // profiling showed that it's good to have 4 producers per 64 rows
+      // profiling showed that it's good to have 4 consumer warps per 64 rows
       constexpr auto numConsumers = (DIM / 64) * 4;
       constexpr auto numProducers = 1;
       constexpr auto numWarps = numProducers + numConsumers;
 
       constexpr auto sectorSize = 32;  // bytes
-      constexpr auto stageCols = 2 * sectorSize / sizeof(state_t);
+      constexpr auto stageCols =
+          2 * sectorSize /
+          sizeof(state_t);  // bf16 has 16 columns per stage, fp32 has 8 columns per stage
 
       constexpr auto totalStages = DSTATE / stageCols;
       constexpr auto numStages = (totalStages >= 4) ? 4 : totalStages;
