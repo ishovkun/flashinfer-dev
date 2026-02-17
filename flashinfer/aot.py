@@ -81,7 +81,6 @@ from .jit.gemm import (
 from .jit.mamba import (
     gen_selective_state_update_module,
     gen_selective_state_update_sm90_module,
-    gen_selective_state_update_sm100_module,
 )
 from .jit.mla import gen_mla_module
 from .jit.norm import gen_norm_module
@@ -577,14 +576,11 @@ def gen_all_modules(
         ]
         for combo in _ssu_dtype_combos:
             jit_specs.append(gen_selective_state_update_module(*combo))
-        if has_sm90:
+        if has_sm90 or has_sm100:
             for combo in _ssu_dtype_combos:
                 jit_specs.append(gen_selective_state_update_sm90_module(*combo))
             jit_specs.append(gen_trtllm_utils_module())
             jit_specs.append(gen_gdn_prefill_sm90_module())
-        if has_sm100:
-            for combo in _ssu_dtype_combos:
-                jit_specs.append(gen_selective_state_update_sm100_module(*combo))
 
     if (
         add_xqa and get_cuda_version() > Version("12.8")

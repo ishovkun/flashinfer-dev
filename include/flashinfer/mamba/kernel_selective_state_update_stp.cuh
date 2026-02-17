@@ -535,11 +535,7 @@ __global__ void selective_state_update_kernel_producer_consumer_vertical(
 #endif
 }
 
-// =============================================================================
-// Horizontal Producer-Consumer Kernel for SM100+ (Blackwell and newer)
-// =============================================================================
-
-#ifdef FLASHINFER_MAMBA_ENABLE_SM100
+#ifdef FLASHINFER_MAMBA_ENABLE_SM90
 
 template <typename input_t, typename weight_t, typename matrixA_t,
           typename state_t,  //
@@ -881,7 +877,7 @@ __global__ void selective_state_update_kernel_producer_consumer_horizontal(
   }
 }
 
-#endif  // FLASHINFER_MAMBA_ENABLE_SM100
+#endif  // FLASHINFER_MAMBA_ENABLE_SM90 (horizontal kernel)
 
 template <typename input_t, typename weight_t, typename matrixA_t, typename state_t,
           typename stateIndex_t>
@@ -891,9 +887,7 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t
   // Common alignment checks for all kernels
   check_ptr_alignment_input_vars<input_t>(params);
 
-#ifdef FLASHINFER_MAMBA_ENABLE_SM100
-  if (sm_major < 10)  // pre-Blackwell
-#elif defined(FLASHINFER_MAMBA_ENABLE_SM90)
+#ifdef FLASHINFER_MAMBA_ENABLE_SM90
   if (sm_major < 9)  // pre-Hopper
 #endif
   {
@@ -917,10 +911,9 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t
     dispatchDimDstate(params, AllowedDims{}, AllowedDstates{}, kernel_launcher);
   }
 #ifdef FLASHINFER_MAMBA_ENABLE_SM90
-  else {
-
+  else if (sm_major < 10) {
+    // SM90 (Hopper) uses vertical producer-consumer kernel
     auto kernel_launcher = [&]<int DIM, int DSTATE>() {
-      // Note: State uses TMA which requires 128B alignment (checked below)
       constexpr auto numConsumers = 4;
       constexpr auto numWarps = 1 + numConsumers;
       constexpr auto numStages = 3;
@@ -943,7 +936,6 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t
                                  /*strides*/ {1, DSTATE, DSTATE * DIM, params.state_stride_batch},
                                  /*tiles*/ {DSTATE, rowsPerStage, 1, 1}, params.state);
 
-      // Calculate shared memory size and opt-in to extended shared memory
       using sram_t = SharedStorageVertical<input_t, weight_t, matrixA_t, state_t, rowsPerStage, DIM,
                                            DSTATE, numStages>;
       constexpr size_t smem_size = sizeof(sram_t);
@@ -954,22 +946,15 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t
     };
 
     dispatchDimDstate(params, AllowedDims{}, AllowedDstates{}, kernel_launcher);
-  }
-#endif
-
-#ifdef FLASHINFER_MAMBA_ENABLE_SM100
-  else {
+  } else {
     // SM100+ (Blackwell and newer) uses horizontal producer-consumer kernel
     auto kernel_launcher = [&]<int DIM, int DSTATE>() {
-      // profiling showed that it's good to have 4 consumer warps per 64 rows
       constexpr auto numConsumers = (DIM / 64) * 4;
       constexpr auto numProducers = 1;
       constexpr auto numWarps = numProducers + numConsumers;
 
       constexpr auto sectorSize = 32;  // bytes
-      constexpr auto stageCols =
-          2 * sectorSize /
-          sizeof(state_t);  // bf16 has 16 columns per stage, fp32 has 8 columns per stage
+      constexpr auto stageCols = 2 * sectorSize / sizeof(state_t);
 
       constexpr auto totalStages = DSTATE / stageCols;
       constexpr auto numStages = (totalStages >= 4) ? 4 : totalStages;

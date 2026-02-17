@@ -23,7 +23,6 @@ from ..api_logging import flashinfer_api
 from ..jit.mamba import (
     gen_selective_state_update_module,
     gen_selective_state_update_sm90_module,
-    gen_selective_state_update_sm100_module,
 )
 from ..utils import get_compute_capability, register_custom_op, register_fake_op
 
@@ -44,9 +43,7 @@ def _get_module(
         matrixA_dtype,
         stateIndex_dtype,
     )
-    if sm_major >= 10:
-        return gen_selective_state_update_sm100_module(*dtype_args).build_and_load()
-    elif sm_major == 9:
+    if sm_major >= 9:
         return gen_selective_state_update_sm90_module(*dtype_args).build_and_load()
     else:
         return gen_selective_state_update_module(*dtype_args).build_and_load()
