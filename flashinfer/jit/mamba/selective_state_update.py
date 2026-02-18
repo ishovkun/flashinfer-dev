@@ -49,12 +49,16 @@ def get_selective_state_update_uri(
     weight_dtype: torch.dtype,
     matrixA_dtype: torch.dtype,
     stateIndex_dtype: torch.dtype,
+    dim: int,
+    dstate: int,
+    ntokens_mtp: int,
 ) -> str:
     s = _filename_safe_dtype_map
     return (
         f"selective_state_update_"
         f"s_{s[state_dtype]}_i_{s[input_dtype]}_w_{s[weight_dtype]}_"
-        f"a_{s[matrixA_dtype]}_si_{s[stateIndex_dtype]}"
+        f"a_{s[matrixA_dtype]}_si_{s[stateIndex_dtype]}_"
+        f"d_{dim}_ds_{dstate}_nt_{ntokens_mtp}"
     )
 
 
@@ -65,6 +69,9 @@ def _gen_module(
     weight_dtype: torch.dtype,
     matrixA_dtype: torch.dtype,
     stateIndex_dtype: torch.dtype,
+    dim: int,
+    dstate: int,
+    ntokens_mtp: int,
     extra_cuda_cflags: list = None,
 ) -> JitSpec:
     gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / uri
@@ -82,6 +89,9 @@ def _gen_module(
         weight_dtype=_dtype_map[weight_dtype],
         matrixA_dtype=_dtype_map[matrixA_dtype],
         stateIndex_dtype=_dtype_map[stateIndex_dtype],
+        dim=dim,
+        dstate=dstate,
+        ntokens_mtp=ntokens_mtp,
     )
     write_if_different(gen_directory / "selective_state_update_config.inc", config_str)
 
@@ -112,12 +122,30 @@ def gen_selective_state_update_module(
     weight_dtype: torch.dtype,
     matrixA_dtype: torch.dtype,
     stateIndex_dtype: torch.dtype,
+    dim: int,
+    dstate: int,
+    ntokens_mtp: int,
 ) -> JitSpec:
     uri = get_selective_state_update_uri(
-        state_dtype, input_dtype, weight_dtype, matrixA_dtype, stateIndex_dtype
+        state_dtype,
+        input_dtype,
+        weight_dtype,
+        matrixA_dtype,
+        stateIndex_dtype,
+        dim,
+        dstate,
+        ntokens_mtp,
     )
     return _gen_module(
-        uri, state_dtype, input_dtype, weight_dtype, matrixA_dtype, stateIndex_dtype
+        uri,
+        state_dtype,
+        input_dtype,
+        weight_dtype,
+        matrixA_dtype,
+        stateIndex_dtype,
+        dim,
+        dstate,
+        ntokens_mtp,
     )
 
 
@@ -127,10 +155,20 @@ def gen_selective_state_update_sm90_module(
     weight_dtype: torch.dtype,
     matrixA_dtype: torch.dtype,
     stateIndex_dtype: torch.dtype,
+    dim: int,
+    dstate: int,
+    ntokens_mtp: int,
 ) -> JitSpec:
     uri = (
         get_selective_state_update_uri(
-            state_dtype, input_dtype, weight_dtype, matrixA_dtype, stateIndex_dtype
+            state_dtype,
+            input_dtype,
+            weight_dtype,
+            matrixA_dtype,
+            stateIndex_dtype,
+            dim,
+            dstate,
+            ntokens_mtp,
         )
         + "_sm90"
     )
@@ -146,5 +184,8 @@ def gen_selective_state_update_sm90_module(
         weight_dtype,
         matrixA_dtype,
         stateIndex_dtype,
+        dim,
+        dstate,
+        ntokens_mtp,
         extra_cuda_cflags=nvcc_flags,
     )

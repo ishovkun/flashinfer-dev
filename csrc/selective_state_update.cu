@@ -130,7 +130,7 @@ void run_selective_state_update_stp(TensorView const& state, TensorView const& x
                                     Optional<TensorView> z, Optional<TensorView> dt_bias,
                                     bool dt_softplus, Optional<TensorView> state_batch_indices,
                                     int64_t pad_slot_id, Optional<TensorView> out,
-                                    bool disable_state_update) {
+                                    bool disable_state_update, int64_t algorithm) {
   // Extract dimensions from input tensors
   auto const batch = x.size(0);
   auto const state_cache_size = state.size(0);
@@ -270,7 +270,8 @@ void run_selective_state_update_stp(TensorView const& state, TensorView const& x
   ffi::CUDADeviceGuard device_guard(state.device().device_id);
   const cudaStream_t stream = get_stream(state.device());
 
-  invokeSelectiveStateUpdate<input_t, weight_t, matrixA_t, state_t, stateIndex_t>(p, stream);
+  auto algo = static_cast<SSUAlgorithm>(algorithm);
+  invokeSelectiveStateUpdate<input_t, weight_t, matrixA_t, state_t, stateIndex_t>(p, algo, stream);
 }
 
 void run_selective_state_update_mtp(
@@ -279,7 +280,7 @@ void run_selective_state_update_mtp(
     Optional<TensorView> dt_bias, bool dt_softplus, Optional<TensorView> state_batch_indices,
     int64_t pad_slot_id, Optional<TensorView> out, bool disable_state_update,
     Optional<TensorView> intermediate_states_buffer,
-    Optional<TensorView> intermediate_state_indices, int64_t cache_steps) {
+    Optional<TensorView> intermediate_state_indices, int64_t cache_steps, int64_t algorithm) {
   // Extract dimensions from input tensors
   auto const batch = x.size(0);
   auto const ntokens_mtp = x.size(1);
@@ -466,7 +467,8 @@ void run_selective_state_update_mtp(
   ffi::CUDADeviceGuard device_guard(state.device().device_id);
   const cudaStream_t stream = get_stream(state.device());
 
-  mtp::invokeSelectiveStateUpdateMTP<input_t, weight_t, matrixA_t, state_t, stateIndex_t>(p,
+  auto algo = static_cast<SSUAlgorithm>(algorithm);
+  mtp::invokeSelectiveStateUpdateMTP<input_t, weight_t, matrixA_t, state_t, stateIndex_t>(p, algo,
                                                                                           stream);
 }
 
@@ -479,14 +481,17 @@ void selective_state_update(TensorView state, TensorView x, TensorView dt, Tenso
                             Optional<TensorView> state_batch_indices, int64_t pad_slot_id,
                             TensorView output, bool disable_state_update,
                             Optional<TensorView> intermediate_states_buffer,
-                            Optional<TensorView> intermediate_state_indices, int64_t cache_steps) {
+                            Optional<TensorView> intermediate_state_indices, int64_t cache_steps,
+                            int64_t algorithm) {
   if (x.dim() == 3) {
     run_selective_state_update_stp(state, x, dt, A, B, C, D, z, dt_bias, dt_softplus,
-                                   state_batch_indices, pad_slot_id, output, disable_state_update);
+                                   state_batch_indices, pad_slot_id, output, disable_state_update,
+                                   algorithm);
   } else if (x.dim() == 4) {
-    run_selective_state_update_mtp(
-        state, x, dt, A, B, C, D, z, dt_bias, dt_softplus, state_batch_indices, pad_slot_id, output,
-        disable_state_update, intermediate_states_buffer, intermediate_state_indices, cache_steps);
+    run_selective_state_update_mtp(state, x, dt, A, B, C, D, z, dt_bias, dt_softplus,
+                                   state_batch_indices, pad_slot_id, output, disable_state_update,
+                                   intermediate_states_buffer, intermediate_state_indices,
+                                   cache_steps, algorithm);
   } else {
     FLASHINFER_CHECK(false,
                      "x must have 3 dimensions (single-token) or 4 dimensions (multi-token), got ",

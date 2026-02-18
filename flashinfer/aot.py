@@ -574,11 +574,24 @@ def gen_all_modules(
             (torch.float16, torch.bfloat16, torch.float32, torch.float32, torch.int64),
             (torch.float32, torch.bfloat16, torch.float32, torch.float32, torch.int64),
         ]
-        for combo in _ssu_dtype_combos:
-            jit_specs.append(gen_selective_state_update_module(*combo))
+        _ssu_dims = [64, 128, 256]
+        _ssu_dstates = [64, 128, 256]
+        _ssu_ntokens = [1, 2, 4, 6, 8, 12, 16]
+        for dtype_combo, dim, dstate, ntokens in product(
+            _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
+        ):
+            jit_specs.append(
+                gen_selective_state_update_module(*dtype_combo, dim, dstate, ntokens)
+            )
         if has_sm90 or has_sm100:
-            for combo in _ssu_dtype_combos:
-                jit_specs.append(gen_selective_state_update_sm90_module(*combo))
+            for dtype_combo, dim, dstate, ntokens in product(
+                _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
+            ):
+                jit_specs.append(
+                    gen_selective_state_update_sm90_module(
+                        *dtype_combo, dim, dstate, ntokens
+                    )
+                )
             jit_specs.append(gen_trtllm_utils_module())
             jit_specs.append(gen_gdn_prefill_sm90_module())
 

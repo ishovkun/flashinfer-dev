@@ -881,63 +881,99 @@ __global__ void selective_state_update_kernel_producer_consumer_horizontal(
 
 template <typename input_t, typename weight_t, typename matrixA_t, typename state_t,
           typename stateIndex_t>
-void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t stream) {
+void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, SSUAlgorithm algorithm,
+                                cudaStream_t stream) {
   auto [sm_major, sm_minor] = GetCudaComputeCapability();
 
   // Common alignment checks for all kernels
   check_ptr_alignment_input_vars<input_t>(params);
 
+  // Resolve auto to a concrete algorithm based on GPU architecture
+  SSUAlgorithm algo = algorithm;
+  if (algo == SSUAlgorithm::kAuto) {
 #ifdef FLASHINFER_MAMBA_ENABLE_SM90
-  if (sm_major < 9)  // pre-Hopper
+    if (sm_major < 9)
+      algo = SSUAlgorithm::kSimple;
+    else if (sm_major < 10)
+      algo = SSUAlgorithm::kVertical;
+    else
+      algo = SSUAlgorithm::kHorizontal;
+#else
+    algo = SSUAlgorithm::kSimple;
 #endif
-  {
-    auto kernel_launcher = [&]<int DIM, int DSTATE>() {
-      // Additional alignment checks specific to simple kernel
-      constexpr auto stateLoadSize = getVectorLoadSizeForFullUtilization<state_t, DSTATE>();
-      using load_state_t = PackedAligned<state_t, stateLoadSize>;
+  }
 
-      FLASHINFER_CHECK(reinterpret_cast<uintptr_t>(params.state) % sizeof(load_state_t) == 0,
-                       "state pointer must be aligned to ", sizeof(load_state_t), " bytes");
-      FLASHINFER_CHECK((params.dim * params.dstate * sizeof(state_t)) % sizeof(load_state_t) == 0,
-                       "state head stride must be aligned to ", sizeof(load_state_t), " bytes");
+  if (algo == SSUAlgorithm::kSimple) {
+    constexpr auto stateLoadSize = getVectorLoadSizeForFullUtilization<state_t, DSTATE>();
+    using load_state_t = PackedAligned<state_t, stateLoadSize>;
 
-      constexpr int numWarps = 4;
-      dim3 block(warpSize, numWarps);
-      dim3 grid(params.batch, params.nheads);
-      selective_state_update_kernel_simple<input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM,
-                                           DSTATE, numWarps><<<grid, block, 0, stream>>>(params);
-    };
+    FLASHINFER_CHECK(reinterpret_cast<uintptr_t>(params.state) % sizeof(load_state_t) == 0,
+                     "state pointer must be aligned to ", sizeof(load_state_t), " bytes");
+    FLASHINFER_CHECK((params.dim * params.dstate * sizeof(state_t)) % sizeof(load_state_t) == 0,
+                     "state head stride must be aligned to ", sizeof(load_state_t), " bytes");
 
-    dispatchDimDstate(params, AllowedDims{}, AllowedDstates{}, kernel_launcher);
+    constexpr int numWarps = 4;
+    dim3 block(warpSize, numWarps);
+    dim3 grid(params.batch, params.nheads);
+    selective_state_update_kernel_simple<input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM,
+                                         DSTATE, numWarps><<<grid, block, 0, stream>>>(params);
   }
 #ifdef FLASHINFER_MAMBA_ENABLE_SM90
-  else if (sm_major < 10) {
-    // SM90 (Hopper) uses vertical producer-consumer kernel
-    auto kernel_launcher = [&]<int DIM, int DSTATE>() {
-      constexpr auto numConsumers = 4;
-      constexpr auto numWarps = 1 + numConsumers;
-      constexpr auto numStages = 3;
-      constexpr auto rowsPerStage = 4 * numConsumers;
-      FLASHINFER_CHECK(params.dim % rowsPerStage == 0, "dim must be divisible by ", rowsPerStage,
-                       " for SM90+ kernel");
-      auto scan_func = selective_state_update_kernel_producer_consumer_vertical<
-          input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM, DSTATE, numConsumers,
-          rowsPerStage, numStages>;
+  else if (algo == SSUAlgorithm::kVertical) {
+    constexpr auto numConsumers = 4;
+    constexpr auto numWarps = 1 + numConsumers;
+    constexpr auto numStages = 3;
+    constexpr auto rowsPerStage = 4 * numConsumers;
+    FLASHINFER_CHECK(params.dim % rowsPerStage == 0, "dim must be divisible by ", rowsPerStage,
+                     " for vertical kernel");
+    auto scan_func = selective_state_update_kernel_producer_consumer_vertical<
+        input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM, DSTATE, numConsumers,
+        rowsPerStage, numStages>;
+
+    dim3 block(warpSize, numWarps);
+    dim3 grid(params.batch, params.nheads);
+
+    auto state_tensor =
+        tma::buildNdDescriptor(typeid(state_t),
+                               /*shapes*/ {DSTATE, DIM, params.nheads, params.state_cache_size},
+                               /*strides*/ {1, DSTATE, DSTATE * DIM, params.state_stride_batch},
+                               /*tiles*/ {DSTATE, rowsPerStage, 1, 1}, params.state);
+
+    using sram_t = SharedStorageVertical<input_t, weight_t, matrixA_t, state_t, rowsPerStage, DIM,
+                                         DSTATE, numStages>;
+    constexpr size_t smem_size = sizeof(sram_t);
+    FLASHINFER_CUDA_CHECK(
+        cudaFuncSetAttribute(scan_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+
+    scan_func<<<grid, block, smem_size, stream>>>(params, state_tensor);
+  } else if (algo == SSUAlgorithm::kHorizontal) {
+    constexpr auto numConsumers = (DIM / 64) * 4;
+    constexpr auto numProducers = 1;
+    constexpr auto numWarps = numProducers + numConsumers;
+
+    constexpr auto sectorSize = 32;  // bytes
+    constexpr auto stageCols = 2 * sectorSize / sizeof(state_t);
+
+    constexpr auto totalStages = DSTATE / stageCols;
+    constexpr auto numStages = (totalStages >= 4) ? 4 : totalStages;
+
+    auto ratio_launcher = [&]<int RATIO>() {
+      auto scan_func = selective_state_update_kernel_producer_consumer_horizontal<
+          input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM, DSTATE, numConsumers, stageCols,
+          RATIO, numStages>;
 
       dim3 block(warpSize, numWarps);
       dim3 grid(params.batch, params.nheads);
-
-      auto nh = params.nheads;
-      auto dim = params.dim;
 
       auto state_tensor =
           tma::buildNdDescriptor(typeid(state_t),
-                                 /*shapes*/ {DSTATE, DIM, nh, params.state_cache_size},
+                                 /*shapes*/ {DSTATE, DIM, params.nheads, params.state_cache_size},
                                  /*strides*/ {1, DSTATE, DSTATE * DIM, params.state_stride_batch},
-                                 /*tiles*/ {DSTATE, rowsPerStage, 1, 1}, params.state);
+                                 /*tiles*/ {stageCols, DIM, 1, 1}, params.state);
+      static_assert(DSTATE % stageCols == 0 && DSTATE >= stageCols);
 
-      using sram_t = SharedStorageVertical<input_t, weight_t, matrixA_t, state_t, rowsPerStage, DIM,
-                                           DSTATE, numStages>;
+      using sram_t = SharedStorageHorizontal<input_t, weight_t, matrixA_t, state_t, DIM, DSTATE,
+                                             stageCols, numStages>;
       constexpr size_t smem_size = sizeof(sram_t);
       FLASHINFER_CUDA_CHECK(
           cudaFuncSetAttribute(scan_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
@@ -945,53 +981,13 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, cudaStream_t
       scan_func<<<grid, block, smem_size, stream>>>(params, state_tensor);
     };
 
-    dispatchDimDstate(params, AllowedDims{}, AllowedDstates{}, kernel_launcher);
-  } else {
-    // SM100+ (Blackwell and newer) uses horizontal producer-consumer kernel
-    auto kernel_launcher = [&]<int DIM, int DSTATE>() {
-      constexpr auto numConsumers = (DIM / 64) * 4;
-      constexpr auto numProducers = 1;
-      constexpr auto numWarps = numProducers + numConsumers;
-
-      constexpr auto sectorSize = 32;  // bytes
-      constexpr auto stageCols = 2 * sectorSize / sizeof(state_t);
-
-      constexpr auto totalStages = DSTATE / stageCols;
-      constexpr auto numStages = (totalStages >= 4) ? 4 : totalStages;
-
-      auto ratio_launcher = [&]<int RATIO>() {
-        auto scan_func = selective_state_update_kernel_producer_consumer_horizontal<
-            input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM, DSTATE, numConsumers,
-            stageCols, RATIO, numStages>;
-
-        dim3 block(warpSize, numWarps);
-        dim3 grid(params.batch, params.nheads);
-
-        auto nh = params.nheads;
-        auto dim = params.dim;
-
-        auto state_tensor =
-            tma::buildNdDescriptor(typeid(state_t),
-                                   /*shapes*/ {DSTATE, DIM, nh, params.state_cache_size},
-                                   /*strides*/ {1, DSTATE, DSTATE * DIM, params.state_stride_batch},
-                                   /*tiles*/ {stageCols, DIM, 1, 1}, params.state);
-        static_assert(DSTATE % stageCols == 0 && DSTATE >= stageCols);
-
-        using sram_t = SharedStorageHorizontal<input_t, weight_t, matrixA_t, state_t, DIM, DSTATE,
-                                               stageCols, numStages>;
-        constexpr size_t smem_size = sizeof(sram_t);
-        FLASHINFER_CUDA_CHECK(cudaFuncSetAttribute(
-            scan_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-
-        scan_func<<<grid, block, smem_size, stream>>>(params, state_tensor);
-      };
-
-      dispatchRatio(params, std::integer_sequence<int, 1, 8, 16>{}, ratio_launcher);
-    };
-
-    dispatchDimDstate(params, AllowedDims{}, AllowedDstates{}, kernel_launcher);
+    dispatchRatio(params, std::integer_sequence<int, 1, 8, 16>{}, ratio_launcher);
   }
 #endif
+  else {
+    FLASHINFER_CHECK(false, "Unsupported SSU algorithm: ", static_cast<int32_t>(algo),
+                     ". Vertical/horizontal require FLASHINFER_MAMBA_ENABLE_SM90.");
+  }
 }
 
 }  // namespace flashinfer::mamba
