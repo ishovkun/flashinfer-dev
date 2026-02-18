@@ -13,9 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <flashinfer/mamba/selective_state_update.cuh>
-
+// clang-format off
+// config.inc MUST come before the header: it defines DIM, DSTATE, NTOKENS_MTP
+// constexprs that the header's function templates rely on. Reordering breaks compilation.
 #include "selective_state_update_config.inc"
+#include <flashinfer/mamba/selective_state_update.cuh>
+// clang-format on
 #include "tvm_ffi_utils.h"
 
 using namespace flashinfer;
