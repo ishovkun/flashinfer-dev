@@ -8,6 +8,26 @@ from .selective_state_update_triton import selective_state_update_triton
 from .utils import create_test_inputs, clone_preserving_strides
 
 
+# Base combination: batch=64, nheads=64, dim=64, dstate=128, state_dtype=bf16,
+#                   weight_dtype=f32, use_out_tensor=True
+# Each additional row varies exactly one parameter from the base.
+# fmt: off
+_BASE_PARAMS = [
+    # (batch, nheads, dim, dstate,  state_dtype,        weight_dtype,      use_out_tensor)
+    (  64,    64,     64,  128,     torch.bfloat16,     torch.float32,     True ),  # base bf16
+    (  64,    64,     64,  128,     torch.float32,      torch.float32,     True ),  # state_dtype=f32
+    (   1,    64,     64,  128,     torch.bfloat16,     torch.float32,     True ),  # batch=1
+    (  64,     8,     64,  128,     torch.bfloat16,     torch.float32,     True ),  # nheads=8
+    (  64,    64,    128,  128,     torch.bfloat16,     torch.float32,     True ),  # dim=128
+    (  64,    64,     64,   64,     torch.bfloat16,     torch.float32,     True ),  # dstate=64
+    (  64,    64,     64,  256,     torch.bfloat16,     torch.float32,     True ),  # dstate=256
+    (  64,    64,     64,  128,     torch.float16,      torch.float32,     True ),  # state_dtype=f16
+    (  64,    64,     64,  128,     torch.bfloat16,     torch.bfloat16,    True ),  # weight_dtype=bf16
+    (  64,    64,     64,  128,     torch.bfloat16,     torch.float32,     False),  # use_out_tensor=False
+]
+# fmt: on
+
+
 class TestSelectiveStateUpdate:
     """Test class for selective state update kernels."""
 
@@ -18,36 +38,7 @@ class TestSelectiveStateUpdate:
     INPUT_DTYPE = torch.bfloat16
     MATRIX_A_DTYPE = torch.float32
 
-    @pytest.fixture(params=[1, 64])
-    def batch(self, request):
-        return request.param
-
-    @pytest.fixture(params=[8, 64])
-    def nheads(self, request):
-        return request.param
-
-    @pytest.fixture(params=[64, 128])
-    def dim(self, request):
-        return request.param
-
-    @pytest.fixture(params=[64, 128, 256])
-    def dstate(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.float16, torch.bfloat16, torch.float32])
-    def state_dtype(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.float32, torch.bfloat16])
-    def weight_dtype(self, request):
-        return request.param
-
-    @pytest.fixture(params=[False, True])
-    def use_out_tensor(self, request):
-        return request.param
-
-    @pytest.fixture
-    def inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
+    def make_inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
         """Create test inputs for given parameters."""
         return create_test_inputs(
             batch,
@@ -63,8 +54,7 @@ class TestSelectiveStateUpdate:
             seed=0,
         )
 
-    @pytest.fixture
-    def reference_output(self, inputs):
+    def make_reference_output(self, inputs):
         """Compute reference output using triton implementation."""
         state_ref = inputs["state_cache"].clone()
         y_ref = selective_state_update_triton(
@@ -165,15 +155,18 @@ class TestSelectiveStateUpdate:
                 f"diff={diff:.6e}, rel_diff={rel_diff:.6e}"
             )
 
-    def test_output_correctness(self, inputs, reference_output, use_out_tensor):
+    @pytest.mark.parametrize(
+        "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor", _BASE_PARAMS
+    )
+    def test_output_correctness(
+        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+    ):
         """Test that kernel output matches reference within tolerance."""
-        y_ref, state_ref = reference_output
+        inputs = self.make_inputs(batch, nheads, dim, dstate, state_dtype, weight_dtype)
+        y_ref, state_ref = self.make_reference_output(inputs)
 
         # Prepare output tensor if requested
         if use_out_tensor:
-            batch = inputs["x"].shape[0]
-            nheads = inputs["x"].shape[1]
-            dim = inputs["x"].shape[2]
             out = torch.empty(batch, nheads, dim, dtype=self.INPUT_DTYPE, device="cuda")
         else:
             out = None
@@ -193,32 +186,7 @@ class TestSelectiveStateUpdate:
 class TestSelectiveStateUpdateWithZ(TestSelectiveStateUpdate):
     """Test selective_state_update with z tensor (gating)."""
 
-    @pytest.fixture(params=[1])
-    def batch(self, request):
-        return request.param
-
-    @pytest.fixture(params=[8])
-    def nheads(self, request):
-        return request.param
-
-    @pytest.fixture(params=[64])
-    def dim(self, request):
-        return request.param
-
-    @pytest.fixture(params=[128])
-    def dstate(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def state_dtype(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def weight_dtype(self, request):
-        return request.param
-
-    @pytest.fixture
-    def inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
+    def make_inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
         """Create test inputs with z tensor."""
         return create_test_inputs(
             batch,
@@ -234,33 +202,20 @@ class TestSelectiveStateUpdateWithZ(TestSelectiveStateUpdate):
             seed=0,
         )
 
+    @pytest.mark.parametrize(
+        "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
+        [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
+    )
+    def test_output_correctness(
+        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+    ):
+        super().test_output_correctness(
+            batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        )
+
 
 class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
     """Test selective_state_update with disable_state_update=True."""
-
-    @pytest.fixture(params=[1])
-    def batch(self, request):
-        return request.param
-
-    @pytest.fixture(params=[8])
-    def nheads(self, request):
-        return request.param
-
-    @pytest.fixture(params=[128])
-    def dim(self, request):
-        return request.param
-
-    @pytest.fixture(params=[64])
-    def dstate(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def state_dtype(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def weight_dtype(self, request):
-        return request.param
 
     def run_kernel(self, inputs, out=None):
         """Run the flashinfer kernel with disable_state_update=True."""
@@ -281,18 +236,22 @@ class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
             disable_state_update=True,
         )
 
-    def test_output_correctness(self, inputs, reference_output, use_out_tensor):
+    @pytest.mark.parametrize(
+        "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
+        [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
+    )
+    def test_output_correctness(
+        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+    ):
         """Test that kernel output matches reference but state is not updated."""
-        y_ref, state_ref = reference_output
+        inputs = self.make_inputs(batch, nheads, dim, dstate, state_dtype, weight_dtype)
+        y_ref, state_ref = self.make_reference_output(inputs)
 
         # Save the initial state before running the kernel
         state_initial = inputs["state_cache"].clone()
 
         # Prepare output tensor if requested
         if use_out_tensor:
-            batch = inputs["x"].shape[0]
-            nheads = inputs["x"].shape[1]
-            dim = inputs["x"].shape[2]
             out = torch.empty(batch, nheads, dim, dtype=self.INPUT_DTYPE, device="cuda")
         else:
             out = None
@@ -339,20 +298,7 @@ class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
 class TestSelectiveStateUpdateNonContiguous(TestSelectiveStateUpdate):
     """Test selective_state_update with non-contiguous state cache."""
 
-    @pytest.fixture(params=[128])
-    def dstate(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def state_dtype(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.float32])
-    def weight_dtype(self, request):
-        return request.param
-
-    @pytest.fixture
-    def inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
+    def make_inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
         """Create test inputs with non-contiguous state cache (2x batch stride)."""
         noncontiguous_batch_stride = 2 * nheads * dim * dstate
 
@@ -371,8 +317,7 @@ class TestSelectiveStateUpdateNonContiguous(TestSelectiveStateUpdate):
             seed=0,
         )
 
-    @pytest.fixture
-    def reference_output(self, inputs):
+    def make_reference_output(self, inputs):
         """Compute reference output, preserving non-contiguous strides."""
         state_ref = clone_preserving_strides(inputs["state_cache"])
         y_ref = selective_state_update_triton(
@@ -391,33 +336,20 @@ class TestSelectiveStateUpdateNonContiguous(TestSelectiveStateUpdate):
         )
         return y_ref, state_ref
 
+    @pytest.mark.parametrize(
+        "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
+        [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
+    )
+    def test_output_correctness(
+        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+    ):
+        super().test_output_correctness(
+            batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        )
+
 
 class TestSelectiveStateUpdateInt32Indices(TestSelectiveStateUpdate):
     """Test selective_state_update with int32 state_batch_indices."""
-
-    @pytest.fixture(params=[1])
-    def batch(self, request):
-        return request.param
-
-    @pytest.fixture(params=[8])
-    def nheads(self, request):
-        return request.param
-
-    @pytest.fixture(params=[64])
-    def dim(self, request):
-        return request.param
-
-    @pytest.fixture(params=[128])
-    def dstate(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def state_dtype(self, request):
-        return request.param
-
-    @pytest.fixture(params=[torch.bfloat16])
-    def weight_dtype(self, request):
-        return request.param
 
     def run_kernel(self, inputs, out=None):
         """Run the flashinfer kernel with int32 state_batch_indices."""
@@ -438,6 +370,17 @@ class TestSelectiveStateUpdateInt32Indices(TestSelectiveStateUpdate):
             state_batch_indices=slot_idx_int32,
             pad_slot_id=-1,
             out=out,
+        )
+
+    @pytest.mark.parametrize(
+        "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
+        [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
+    )
+    def test_output_correctness(
+        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+    ):
+        super().test_output_correctness(
+            batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
         )
 
 
