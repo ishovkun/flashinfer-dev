@@ -483,23 +483,25 @@ __global__ void selective_state_update_kernel_producer_consumer_vertical(
     }
     auto const dA = __expf(A_value * dt_value);
 
-    if (warp == 0) {  // Load x, B
+    if (warp == 0) {  // Load x
       for (auto d = lane * load_t::count; d < DIM; d += warpSize * load_t::count) {
         auto* dst = reinterpret_cast<load_t*>(&sram.x[d]);
         *dst = *reinterpret_cast<load_t const*>(&x[batch * params.x_stride_batch + head * DIM + d]);
       }
+    } else if (warp == 1) {  // Load B
       for (auto i = lane * load_t::count; i < DSTATE; i += warpSize * load_t::count) {
         auto* dst = reinterpret_cast<load_t*>(&sram.B[i]);
         *dst = *reinterpret_cast<load_t const*>(
             &B[batch * params.B_stride_batch + group * DSTATE + i]);
       }
-    } else if (warp == 1) {  // Load z, C
+    } else if (warp == 2) {  // Load z
       for (auto d = lane * load_t::count; d < DIM; d += warpSize * load_t::count) {
         auto* dst = reinterpret_cast<load_t*>(&sram.z[d]);
         *dst =
             z ? *reinterpret_cast<load_t const*>(&z[batch * params.z_stride_batch + head * DIM + d])
               : make_zeros<load_t>();
       }
+    } else if (warp == 3) {  // Load C
       for (auto i = lane * load_t::count; i < DSTATE; i += warpSize * load_t::count) {
         auto* dst = reinterpret_cast<load_t*>(&sram.C[i]);
         *dst = *reinterpret_cast<load_t const*>(
@@ -985,7 +987,7 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, SSUAlgorithm
   }
 #endif
   else {
-    FLASHINFER_CHECK(false, "Unsupported SSU algorithm: ", static_cast<int32_t>(algo),
+    FLASHINFER_CHECK(false, "Unsupported SSU algorithm: ", SSUAlgorithmToString(algo),
                      ". Vertical/horizontal require FLASHINFER_MAMBA_ENABLE_SM90.");
   }
 }
