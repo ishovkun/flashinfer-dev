@@ -9,25 +9,21 @@
 import torch
 import triton
 import triton.language as tl
-from packaging import version
+
+try:
+    from .softplus import softplus  # noqa: F401
+except ImportError:
+    # Fallback when loaded standalone via importlib (no package context)
+    import os as _os
+    import importlib.util as _ilu
+
+    _softplus_path = _os.path.join(_os.path.dirname(__file__), "softplus.py")
+    _sp_spec = _ilu.spec_from_file_location("softplus", _softplus_path)
+    _sp_mod = _ilu.module_from_spec(_sp_spec)
+    _sp_spec.loader.exec_module(_sp_mod)
+    softplus = _sp_mod.softplus
 
 PAD_SLOT_ID = -1
-
-TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
-
-if TRITON3:
-
-    @triton.jit
-    def softplus(dt):
-        dt = tl.where(dt <= 20.0, tl.math.log(tl.math.exp(dt) + 1), dt)
-        return dt
-
-else:
-
-    @triton.jit
-    def softplus(dt):
-        dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
-        return dt
 
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})

@@ -11,7 +11,7 @@ import torch
 
 import flashinfer
 
-from .selective_state_update_triton import selective_state_update_triton
+from .triton_reference.selective_state_update import selective_state_update_triton
 from .utils import create_test_inputs, clone_preserving_strides
 
 

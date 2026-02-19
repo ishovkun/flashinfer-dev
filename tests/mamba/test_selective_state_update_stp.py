@@ -5,7 +5,7 @@ import torch
 import flashinfer
 from flashinfer.utils import get_compute_capability
 
-from .selective_state_update_triton import selective_state_update_triton
+from .triton_reference.selective_state_update import selective_state_update_triton
 from .utils import create_test_inputs, clone_preserving_strides
 
 
@@ -295,7 +295,7 @@ class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
     ):
         """Test that kernel output matches reference but state is not updated."""
         inputs = self.make_inputs(batch, nheads, dim, dstate, state_dtype, weight_dtype)
-        y_ref, state_ref = self.make_reference_output(inputs)
+        y_ref, _state_ref = self.make_reference_output(inputs)
 
         # Save the initial state before running the kernel
         state_initial = inputs["state_cache"].clone()

@@ -49,17 +49,17 @@ def _import_triton_reference():
     Uses importlib to load the module directly by file path, avoiding sys.path
     pollution and fragile relative path assumptions.
     """
-    # Resolve path: benchmarks/routines/mamba.py -> ../../tests/mamba/selective_state_update_triton.py
+    # Resolve path: benchmarks/routines/mamba.py -> ../../tests/mamba/triton_reference/selective_state_update.py
     _this_dir = os.path.dirname(os.path.abspath(__file__))
     _repo_root = os.path.normpath(os.path.join(_this_dir, "..", ".."))
     _triton_ref_path = os.path.join(
-        _repo_root, "tests", "mamba", "selective_state_update_triton.py"
+        _repo_root, "tests", "mamba", "triton_reference", "selective_state_update.py"
     )
 
     if not os.path.isfile(_triton_ref_path):
         raise ImportError(
             f"Cannot find Triton reference kernel at: {_triton_ref_path}\n"
-            f"Expected location: <repo>/tests/mamba/selective_state_update_triton.py\n"
+            f"Expected location: <repo>/tests/mamba/triton_reference/selective_state_update.py\n"
             f"Make sure you are running from within the FlashInfer repository."
         )
 
