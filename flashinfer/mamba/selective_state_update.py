@@ -149,9 +149,9 @@ def selective_state_update(
     cache_steps : int
         Number of steps/tokens to cache for speculative decoding
     algorithm : str
-        Algorithm to use: "auto" (default, selects based on GPU arch),
-        "simple" (all GPUs), "vertical" (SM90+), "horizontal" (SM100+).
-        MTP mode only supports "auto" or "simple".
+        Algorithm to use: "auto" (default, picks the best kernel based on GPU arch,
+        data types, and problem size), "simple" (all GPUs), "vertical" and "horizontal"
+        (SM90+ only). MTP mode only supports "auto" or "simple".
 
     Returns
     -------
