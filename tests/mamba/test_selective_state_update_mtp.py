@@ -428,7 +428,7 @@ class TestSelectiveStateUpdateMTPWithIntermediateStates(TestSelectiveStateUpdate
         inputs = self.make_inputs(
             batch, nheads, dim, dstate, cache_steps, state_dtype, weight_dtype
         )
-        y_ref, state_ref, intermediate_states_ref = self.make_reference_output(inputs)
+        y_ref, _state_ref, intermediate_states_ref = self.make_reference_output(inputs)
 
         # Prepare output tensor if requested
         if use_out_tensor:
