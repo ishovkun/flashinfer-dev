@@ -49,10 +49,14 @@ PAD_SLOT_ID = -1
         is not None
     }
 )
+@triton.heuristics(
+    {"HAS_STATE_SCALE": lambda args: args["state_scale_ptr"] is not None}
+)
 @triton.jit(do_not_specialize=["T"])
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
+    state_scale_ptr,
     x_ptr,
     dt_ptr,
     dt_bias_ptr,
@@ -80,6 +84,9 @@ def _selective_scan_update_kernel(
     stride_state_head,
     stride_state_dim,
     stride_state_dstate,
+    stride_state_scale_batch,
+    stride_state_scale_head,
+    stride_state_scale_dim,
     stride_x_batch,
     stride_x_T,
     stride_x_head,
@@ -125,6 +132,7 @@ def _selective_scan_update_kernel(
     CACHE_INTERMEDIATE_STATES: tl.constexpr,
     HAS_EAGLE_TREE_CUSTOM_ATTN_MASK: tl.constexpr,
     HAS_INTERMEDIATE_STATE_INDICES: tl.constexpr,
+    HAS_STATE_SCALE: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -138,9 +146,18 @@ def _selective_scan_update_kernel(
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
+        if HAS_STATE_SCALE:
+            state_scale_ptr += (
+                state_batch_idx * stride_state_scale_batch
+                + pid_h * stride_state_scale_head
+            )
     else:
         state_batch_idx = pid_b
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
+        if HAS_STATE_SCALE:
+            state_scale_ptr += (
+                pid_b * stride_state_scale_batch + pid_h * stride_state_scale_head
+            )
 
     x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head
     dt_ptr += pid_b * stride_dt_batch + pid_h * stride_dt_head
@@ -163,6 +180,16 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         mask &= state_batch_idx != pad_slot_id
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
+
+    if HAS_STATE_SCALE:
+        state_scale_ptrs = state_scale_ptr + offs_m[:, None] * stride_state_scale_dim
+        scales_mask = offs_m[:, None] < dim
+        if HAS_STATE_BATCH_INDICES:
+            scales_mask = scales_mask & (state_batch_idx != pad_slot_id)
+        decode_scale = tl.load(state_scale_ptrs, mask=scales_mask, other=1.0).to(
+            tl.float32
+        )
+        state = state * decode_scale
 
     if HAS_DT_BIAS:
         dt_bias_ptrs = dt_bias_ptr + offs_m * stride_dt_bias_dim
@@ -277,6 +304,19 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_T
 
     if not DISABLE_STATE_UPDATE:
+        if HAS_STATE_SCALE:
+            # Quantize state back with block scaling
+            int16_max: tl.constexpr = 32767.0
+            amax = tl.max(tl.abs(state), axis=-1, keep_dims=True)
+            encode_scale = tl.where(amax == 0.0, 1.0, int16_max / amax)
+            new_decode_scale = 1.0 / encode_scale
+            # Store updated decode scales
+            dst_scales_mask = offs_m[:, None] < dim
+            tl.store(state_scale_ptrs, new_decode_scale, mask=dst_scales_mask)
+            # Quantize
+            state = state * encode_scale
+            state = tl.extra.cuda.libdevice.round(state)
+            state = tl.minimum(tl.maximum(state, -int16_max), int16_max)
         tl.store(state_ptrs, state.to(state_ptrs.dtype.element_ty), mask=mask)
 
 
@@ -299,6 +339,7 @@ def selective_state_update_triton(
     cache_steps=None,
     retrieve_parent_token=None,
     intermediate_state_indices=None,
+    state_scale=None,
 ):
     """
     Argument:
@@ -325,6 +366,9 @@ def selective_state_update_triton(
         retrieve_parent_token: (batch, T) tensor of parent token indices for EAGLE tree attention
         intermediate_state_indices: (batch,) tensor of indices for intermediate_states_buffer operations.
             If provided, uses these indices instead of state_batch_indices for the buffer.
+        state_scale: Optional (batch, nheads, dim, 1) float32 tensor of decode scales for
+            block-scaled state quantization. When provided, the kernel dequantizes state
+            on load and requantizes on store.
     """
     # Track original x dimensionality to squeeze output appropriately
     x_orig_dim = x.dim()
@@ -409,6 +453,16 @@ def selective_state_update_triton(
         and (dt_bias is None or dt_bias.stride(-1) == 0)
     )
 
+    if state_scale is not None:
+        assert state_scale.dtype == torch.float32
+        assert state_scale.shape == (state.shape[0], nheads, dim, 1)
+
+    state_scale_strides = (
+        (state_scale.stride(0), state_scale.stride(1), state_scale.stride(2))
+        if state_scale is not None
+        else (0, 0, 0)
+    )
+
     retrieve_parent_token_strides = (
         (retrieve_parent_token.stride(0), retrieve_parent_token.stride(1))
         if retrieve_parent_token is not None
@@ -418,6 +472,7 @@ def selective_state_update_triton(
     with torch.cuda.device(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
+            state_scale,
             x,
             dt,
             dt_bias,
@@ -443,6 +498,9 @@ def selective_state_update_triton(
             state.stride(1),
             state.stride(2),
             state.stride(3),
+            state_scale_strides[0],
+            state_scale_strides[1],
+            state_scale_strides[2],
             x.stride(0),
             x.stride(1),
             x.stride(2),

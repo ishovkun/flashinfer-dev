@@ -467,6 +467,131 @@ class TestSelectiveStateUpdateInt32Indices(TestSelectiveStateUpdate):
         )
 
 
+# fmt: off
+_INT16_PARAMS = [
+    # (batch, nheads, dim, dstate, weight_dtype, use_out_tensor)
+    (  64,    64,     64,  128,    torch.float32,     True ),  # base
+    (   1,    64,     64,  128,    torch.float32,     True ),  # batch=1
+    (  64,     8,     64,  128,    torch.float32,     True ),  # nheads=8
+    (  64,    64,    128,  128,    torch.float32,     True ),  # dim=128
+    (  64,    64,     64,   64,    torch.float32,     True ),  # dstate=64
+    (  64,    64,     64,  256,    torch.float32,     True ),  # dstate=256
+    (  64,    64,     64,  128,    torch.bfloat16,    True ),  # weight_dtype=bf16
+]
+# fmt: on
+
+
+@pytest.mark.xfail(
+    reason="CUDA kernel does not yet support int16 state with block scaling"
+)
+class TestSelectiveStateUpdateInt16(TestSelectiveStateUpdate):
+    """Test selective_state_update with int16 quantized state and block scaling."""
+
+    ATOL = 1e-1
+    RTOL = 1e-2
+
+    def make_inputs(self, batch, nheads, dim, dstate, state_dtype, weight_dtype):
+        """Create test inputs with int16 state."""
+        return create_test_inputs(
+            batch,
+            nheads,
+            dim,
+            dstate,
+            self.NGROUPS,
+            self.INPUT_DTYPE,
+            weight_dtype=weight_dtype,
+            matrixA_dtype=self.MATRIX_A_DTYPE,
+            state_dtype=torch.int16,
+            generate_z=False,
+            seed=0,
+        )
+
+    def make_reference_output(self, inputs):
+        """Compute reference output using Triton with state_scale."""
+        state_ref = inputs["state_cache"].clone()
+        state_scale_ref = inputs["state_scale"].clone()
+        y_ref = selective_state_update_triton(
+            state_ref,
+            inputs["x"],
+            inputs["dt"],
+            inputs["A"],
+            inputs["B"],
+            inputs["C"],
+            D=inputs["D"],
+            z=inputs.get("z"),
+            dt_bias=inputs["dt_bias"],
+            dt_softplus=True,
+            state_batch_indices=inputs["slot_idx"],
+            pad_slot_id=-1,
+            state_scale=state_scale_ref,
+        )
+        return y_ref, state_ref
+
+    def run_kernel(self, inputs, out=None, algorithm="auto"):
+        """Run the flashinfer kernel with state_scale."""
+        return flashinfer.mamba.selective_state_update(
+            inputs["state_cache"],
+            inputs["x"],
+            inputs["dt"],
+            inputs["A"],
+            inputs["B"],
+            inputs["C"],
+            D=inputs["D"],
+            z=inputs.get("z"),
+            dt_bias=inputs["dt_bias"],
+            dt_softplus=True,
+            state_batch_indices=inputs["slot_idx"],
+            pad_slot_id=-1,
+            out=out,
+            state_scale=inputs["state_scale"],
+            algorithm=algorithm,
+        )
+
+    def assert_states_match(self, state_ref, state_test, slot_idx, msg_prefix=""):
+        """Compare dequantized int16 states."""
+        # Both state_ref and state_test are int16; we need state_scale to dequantize
+        # For now, compare raw int16 values (both went through same quant path)
+        state_ref_batch = state_ref[slot_idx]
+        state_test_batch = state_test[slot_idx]
+        states_match = torch.equal(state_ref_batch, state_test_batch)
+
+        if states_match:
+            print(f"✓ {msg_prefix}Int16 states match exactly")
+        else:
+            print(f"✗ {msg_prefix}Int16 states do NOT match")
+            diff = (state_ref_batch.float() - state_test_batch.float()).abs()
+            print(f"  Max diff: {diff.max().item()}, Mean diff: {diff.mean().item()}")
+
+        assert states_match
+
+    @pytest.mark.parametrize("algorithm", _get_algorithms())
+    @pytest.mark.parametrize(
+        "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
+        [(b, nh, d, ds, torch.int16, wd, uo) for b, nh, d, ds, wd, uo in _INT16_PARAMS],
+    )
+    def test_output_correctness(
+        self,
+        batch,
+        nheads,
+        dim,
+        dstate,
+        state_dtype,
+        weight_dtype,
+        use_out_tensor,
+        algorithm,
+    ):
+        super().test_output_correctness(
+            batch,
+            nheads,
+            dim,
+            dstate,
+            state_dtype,
+            weight_dtype,
+            use_out_tensor,
+            algorithm,
+        )
+
+
 class TestSelectiveStateUpdateDtypeMismatch:
     """Test that selective_state_update fails with dtype mismatch between D and dt."""
 
