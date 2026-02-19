@@ -3,9 +3,19 @@ import pytest
 import torch
 
 import flashinfer
+from flashinfer.utils import get_compute_capability
 
 from .selective_state_update_triton import selective_state_update_triton
 from .utils import create_test_inputs, clone_preserving_strides
+
+
+def _get_algorithms():
+    """Return list of algorithms supported on the current GPU."""
+    major, _ = get_compute_capability(torch.device("cuda"))
+    algos = ["simple"]
+    if major >= 9:
+        algos.extend(["vertical", "horizontal"])
+    return algos
 
 
 # Base combination: batch=64, nheads=64, dim=64, dstate=128, state_dtype=bf16,
@@ -73,7 +83,7 @@ class TestSelectiveStateUpdate:
         )
         return y_ref, state_ref
 
-    def run_kernel(self, inputs, out=None):
+    def run_kernel(self, inputs, out=None, algorithm="auto"):
         """Run the flashinfer kernel and return output."""
         return flashinfer.mamba.selective_state_update(
             inputs["state_cache"],
@@ -89,6 +99,7 @@ class TestSelectiveStateUpdate:
             state_batch_indices=inputs["slot_idx"],
             pad_slot_id=-1,
             out=out,
+            algorithm=algorithm,
         )
 
     def assert_outputs_match(self, y_ref, y_test, msg_prefix=""):
@@ -155,11 +166,20 @@ class TestSelectiveStateUpdate:
                 f"diff={diff:.6e}, rel_diff={rel_diff:.6e}"
             )
 
+    @pytest.mark.parametrize("algorithm", _get_algorithms())
     @pytest.mark.parametrize(
         "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor", _BASE_PARAMS
     )
     def test_output_correctness(
-        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        self,
+        batch,
+        nheads,
+        dim,
+        dstate,
+        state_dtype,
+        weight_dtype,
+        use_out_tensor,
+        algorithm,
     ):
         """Test that kernel output matches reference within tolerance."""
         inputs = self.make_inputs(batch, nheads, dim, dstate, state_dtype, weight_dtype)
@@ -171,7 +191,7 @@ class TestSelectiveStateUpdate:
         else:
             out = None
 
-        y_test = self.run_kernel(inputs, out=out)
+        y_test = self.run_kernel(inputs, out=out, algorithm=algorithm)
 
         # Verify output tensor identity if provided
         if use_out_tensor:
@@ -179,8 +199,13 @@ class TestSelectiveStateUpdate:
                 "Returned tensor should be the same object as the provided output tensor"
             )
 
-        self.assert_outputs_match(y_ref, y_test)
-        self.assert_states_match(state_ref, inputs["state_cache"], inputs["slot_idx"])
+        self.assert_outputs_match(y_ref, y_test, msg_prefix=f"[{algorithm}] ")
+        self.assert_states_match(
+            state_ref,
+            inputs["state_cache"],
+            inputs["slot_idx"],
+            msg_prefix=f"[{algorithm}] ",
+        )
 
 
 class TestSelectiveStateUpdateWithZ(TestSelectiveStateUpdate):
@@ -202,22 +227,38 @@ class TestSelectiveStateUpdateWithZ(TestSelectiveStateUpdate):
             seed=0,
         )
 
+    @pytest.mark.parametrize("algorithm", _get_algorithms())
     @pytest.mark.parametrize(
         "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
         [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
     )
     def test_output_correctness(
-        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        self,
+        batch,
+        nheads,
+        dim,
+        dstate,
+        state_dtype,
+        weight_dtype,
+        use_out_tensor,
+        algorithm,
     ):
         super().test_output_correctness(
-            batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+            batch,
+            nheads,
+            dim,
+            dstate,
+            state_dtype,
+            weight_dtype,
+            use_out_tensor,
+            algorithm,
         )
 
 
 class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
     """Test selective_state_update with disable_state_update=True."""
 
-    def run_kernel(self, inputs, out=None):
+    def run_kernel(self, inputs, out=None, algorithm="auto"):
         """Run the flashinfer kernel with disable_state_update=True."""
         return flashinfer.mamba.selective_state_update(
             inputs["state_cache"],
@@ -234,6 +275,7 @@ class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
             pad_slot_id=-1,
             out=out,
             disable_state_update=True,
+            algorithm=algorithm,
         )
 
     @pytest.mark.parametrize(
@@ -241,7 +283,15 @@ class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
         [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
     )
     def test_output_correctness(
-        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        self,
+        batch,
+        nheads,
+        dim,
+        dstate,
+        state_dtype,
+        weight_dtype,
+        use_out_tensor,
+        algorithm="auto",
     ):
         """Test that kernel output matches reference but state is not updated."""
         inputs = self.make_inputs(batch, nheads, dim, dstate, state_dtype, weight_dtype)
@@ -256,7 +306,7 @@ class TestSelectiveStateUpdateDisableStateUpdate(TestSelectiveStateUpdate):
         else:
             out = None
 
-        y_test = self.run_kernel(inputs, out=out)
+        y_test = self.run_kernel(inputs, out=out, algorithm=algorithm)
 
         # Verify output tensor identity if provided
         if use_out_tensor:
@@ -336,22 +386,38 @@ class TestSelectiveStateUpdateNonContiguous(TestSelectiveStateUpdate):
         )
         return y_ref, state_ref
 
+    @pytest.mark.parametrize("algorithm", _get_algorithms())
     @pytest.mark.parametrize(
         "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
         [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
     )
     def test_output_correctness(
-        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        self,
+        batch,
+        nheads,
+        dim,
+        dstate,
+        state_dtype,
+        weight_dtype,
+        use_out_tensor,
+        algorithm,
     ):
         super().test_output_correctness(
-            batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+            batch,
+            nheads,
+            dim,
+            dstate,
+            state_dtype,
+            weight_dtype,
+            use_out_tensor,
+            algorithm,
         )
 
 
 class TestSelectiveStateUpdateInt32Indices(TestSelectiveStateUpdate):
     """Test selective_state_update with int32 state_batch_indices."""
 
-    def run_kernel(self, inputs, out=None):
+    def run_kernel(self, inputs, out=None, algorithm="auto"):
         """Run the flashinfer kernel with int32 state_batch_indices."""
         # Cast slot_idx to int32
         slot_idx_int32 = inputs["slot_idx"].to(torch.int32)
@@ -370,17 +436,34 @@ class TestSelectiveStateUpdateInt32Indices(TestSelectiveStateUpdate):
             state_batch_indices=slot_idx_int32,
             pad_slot_id=-1,
             out=out,
+            algorithm=algorithm,
         )
 
+    @pytest.mark.parametrize("algorithm", _get_algorithms())
     @pytest.mark.parametrize(
         "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
         [(64, 64, 64, 128, torch.bfloat16, torch.float32, True)],
     )
     def test_output_correctness(
-        self, batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+        self,
+        batch,
+        nheads,
+        dim,
+        dstate,
+        state_dtype,
+        weight_dtype,
+        use_out_tensor,
+        algorithm,
     ):
         super().test_output_correctness(
-            batch, nheads, dim, dstate, state_dtype, weight_dtype, use_out_tensor
+            batch,
+            nheads,
+            dim,
+            dstate,
+            state_dtype,
+            weight_dtype,
+            use_out_tensor,
+            algorithm,
         )
 
 

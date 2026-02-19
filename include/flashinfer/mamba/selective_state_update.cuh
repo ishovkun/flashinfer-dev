@@ -30,6 +30,21 @@ enum class SSUAlgorithm : int32_t {
   kHorizontal = 3,
 };
 
+inline const char* SSUAlgorithmToString(SSUAlgorithm algo) {
+  switch (algo) {
+    case SSUAlgorithm::kAuto:
+      return "Auto";
+    case SSUAlgorithm::kSimple:
+      return "Simple";
+    case SSUAlgorithm::kVertical:
+      return "Vertical";
+    case SSUAlgorithm::kHorizontal:
+      return "Horizontal";
+    default:
+      return "Unknown";
+  }
+}
+
 struct SelectiveStateUpdateParams {
   uint32_t batch{}, nheads{}, dim{}, dstate{}, ngroups{}, state_cache_size{};
   int32_t pad_slot_id{-1};
