@@ -278,7 +278,7 @@ class TestSelectiveStateUpdateMTPDisableStateUpdate(TestSelectiveStateUpdateMTP)
         inputs = self.make_inputs(
             batch, nheads, dim, dstate, cache_steps, state_dtype, weight_dtype
         )
-        y_ref, state_ref = self.make_reference_output(inputs)
+        y_ref, _ = self.make_reference_output(inputs)
 
         # Save the initial state before running the kernel
         state_initial = inputs["state_cache"].clone()
