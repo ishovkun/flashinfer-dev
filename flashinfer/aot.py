@@ -581,14 +581,17 @@ def gen_all_modules(
             _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
         ):
             jit_specs.append(
-                gen_selective_state_update_module(*dtype_combo, dim, dstate, ntokens)
+                # false positive: mypy can't resolve the signature because flashinfer.jit deps (filelock etc.)
+                # are absent in mypy's isolated env, causing it to infer an incorrect function signature
+                gen_selective_state_update_module(*dtype_combo, dim, dstate, ntokens)  # type: ignore[call-arg]
             )
         if has_sm90 or has_sm100:
             for dtype_combo, dim, dstate, ntokens in product(
                 _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
             ):
                 jit_specs.append(
-                    gen_selective_state_update_sm90_module(
+                    # same false positive as above
+                    gen_selective_state_update_sm90_module(  # type: ignore[call-arg]
                         *dtype_combo, dim, dstate, ntokens
                     )
                 )
