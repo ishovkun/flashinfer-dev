@@ -22,11 +22,11 @@
 namespace flashinfer::mamba {
 
 template void invokeSelectiveStateUpdate<{{ input_dtype }}, {{ weight_dtype }}, {{ matrixA_dtype }}, {{ state_dtype }}, {{ stateIndex_dtype }}>(
-    SelectiveStateUpdateParams& params, cudaStream_t stream);
+    SelectiveStateUpdateParams& params, SSUAlgorithm algo, cudaStream_t stream);
 
 namespace mtp {
 template void invokeSelectiveStateUpdateMTP<{{ input_dtype }}, {{ weight_dtype }}, {{ matrixA_dtype }}, {{ state_dtype }}, {{ stateIndex_dtype }}>(
-    SelectiveStateMTPParams& params, cudaStream_t stream);
+    SelectiveStateMTPParams& params, SSUAlgorithm algo, cudaStream_t stream);
 }  // namespace mtp
 
 }  // namespace flashinfer::mamba
