@@ -701,6 +701,7 @@ def gen_all_modules(
                     )
                 )
             jit_specs.append(gen_trtllm_utils_module())
+        if has_sm90:
             jit_specs.append(gen_gdn_prefill_sm90_module())
 
     if (
