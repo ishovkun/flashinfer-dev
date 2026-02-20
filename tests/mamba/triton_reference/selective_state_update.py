@@ -455,7 +455,11 @@ def selective_state_update_triton(
 
     if state_scale is not None:
         assert state_scale.dtype == torch.float32
-        assert state_scale.shape == (state.shape[0], nheads, dim, 1)
+        assert state_scale.shape == (
+            state.shape[0],
+            nheads,
+            dim,
+        ) or state_scale.shape == (state.shape[0], nheads, dim, 1)
 
     state_scale_strides = (
         (state_scale.stride(0), state_scale.stride(1), state_scale.stride(2))

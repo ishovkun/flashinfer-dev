@@ -525,7 +525,7 @@ class TestSelectiveStateUpdateInt16(TestSelectiveStateUpdate):
             pad_slot_id=-1,
             state_scale=state_scale_ref,
         )
-        return y_ref, state_ref
+        return y_ref, state_ref, state_scale_ref
 
     def run_kernel(self, inputs, out=None, algorithm="auto"):
         """Run the flashinfer kernel with state_scale."""
@@ -547,20 +547,47 @@ class TestSelectiveStateUpdateInt16(TestSelectiveStateUpdate):
             algorithm=algorithm,
         )
 
-    def assert_states_match(self, state_ref, state_test, slot_idx, msg_prefix=""):
+    def assert_states_match(
+        self,
+        state_ref,
+        state_test,
+        slot_idx,
+        msg_prefix="",
+        state_scale_ref=None,
+        state_scale_test=None,
+    ):
         """Compare dequantized int16 states."""
-        # Both state_ref and state_test are int16; we need state_scale to dequantize
-        # For now, compare raw int16 values (both went through same quant path)
-        state_ref_batch = state_ref[slot_idx]
-        state_test_batch = state_test[slot_idx]
-        states_match = torch.equal(state_ref_batch, state_test_batch)
+        state_ref_batch = state_ref[slot_idx].float()
+        state_test_batch = state_test[slot_idx].float()
+
+        # Dequantize using the respective scales
+        if state_scale_ref is not None:
+            scale_ref = state_scale_ref[
+                slot_idx
+            ]  # (batch, nheads, dim, 1) or (batch, nheads, dim)
+            if scale_ref.dim() == 3:
+                scale_ref = scale_ref.unsqueeze(-1)
+            state_ref_batch = state_ref_batch * scale_ref
+        if state_scale_test is not None:
+            scale_test = state_scale_test[slot_idx]
+            if scale_test.dim() == 3:
+                scale_test = scale_test.unsqueeze(-1)
+            state_test_batch = state_test_batch * scale_test
+
+        states_match = torch.allclose(
+            state_ref_batch, state_test_batch, atol=self.ATOL, rtol=self.RTOL
+        )
 
         if states_match:
-            print(f"✓ {msg_prefix}Int16 states match exactly")
+            print(
+                f"✓ {msg_prefix}Dequantized states match within tolerance (atol={self.ATOL}, rtol={self.RTOL})"
+            )
         else:
-            print(f"✗ {msg_prefix}Int16 states do NOT match")
-            diff = (state_ref_batch.float() - state_test_batch.float()).abs()
-            print(f"  Max diff: {diff.max().item()}, Mean diff: {diff.mean().item()}")
+            print(f"✗ {msg_prefix}Dequantized states do NOT match")
+            diff = (state_ref_batch - state_test_batch).abs()
+            print(
+                f"  Max diff: {diff.max().item():.6f}, Mean diff: {diff.mean().item():.6f}"
+            )
 
         assert states_match
 
@@ -580,15 +607,27 @@ class TestSelectiveStateUpdateInt16(TestSelectiveStateUpdate):
         use_out_tensor,
         algorithm,
     ):
-        super().test_output_correctness(
-            batch,
-            nheads,
-            dim,
-            dstate,
-            state_dtype,
-            weight_dtype,
-            use_out_tensor,
-            algorithm,
+        inputs = self.make_inputs(batch, nheads, dim, dstate, state_dtype, weight_dtype)
+        y_ref, state_ref, state_scale_ref = self.make_reference_output(inputs)
+
+        if use_out_tensor:
+            out = torch.empty(batch, nheads, dim, dtype=self.INPUT_DTYPE, device="cuda")
+        else:
+            out = None
+
+        y_test = self.run_kernel(inputs, out=out, algorithm=algorithm)
+
+        if use_out_tensor:
+            assert y_test.data_ptr() == out.data_ptr()
+
+        self.assert_outputs_match(y_ref, y_test, msg_prefix=f"[{algorithm}] ")
+        self.assert_states_match(
+            state_ref,
+            inputs["state_cache"],
+            inputs["slot_idx"],
+            msg_prefix=f"[{algorithm}] ",
+            state_scale_ref=state_scale_ref,
+            state_scale_test=inputs["state_scale"],
         )
 
 

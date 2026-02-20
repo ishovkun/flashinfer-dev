@@ -38,6 +38,7 @@ def _get_module(
     dstate: int,
     ntokens_mtp: int,
     sm_major: int,
+    scale_state: bool = False,
 ):
     args = (
         state_dtype,
@@ -48,6 +49,7 @@ def _get_module(
         dim,
         dstate,
         ntokens_mtp,
+        scale_state,
     )
     if sm_major >= 9:
         return gen_selective_state_update_sm90_module(*args).build_and_load()
@@ -65,6 +67,7 @@ def get_selective_state_update_module(
     dim: int,
     dstate: int,
     ntokens_mtp: int,
+    scale_state: bool = False,
 ):
     major, _ = get_compute_capability(device)
     return _get_module(
@@ -77,6 +80,7 @@ def get_selective_state_update_module(
         dstate,
         ntokens_mtp,
         major,
+        scale_state,
     )
 
 
@@ -94,6 +98,7 @@ def selective_state_update(
     dt_softplus: bool = False,
     state_batch_indices: Optional[torch.Tensor] = None,
     pad_slot_id: int = -1,
+    state_scale: Optional[torch.Tensor] = None,
     out: Optional[torch.Tensor] = None,
     disable_state_update: bool = False,
     intermediate_states_buffer: Optional[torch.Tensor] = None,
@@ -136,6 +141,9 @@ def selective_state_update(
         If state_batch_indices is passed, lets the kernel identify padded entries
         that will not be processed. For example: state_batch_indices = [pad_slot_id, 1, 20, pad_slot_id]
         in this case, the kernel will not process entries at indices 0 and 3
+    state_scale : Optional[torch.Tensor]
+        Optional float32 scale tensor with shape (state_cache_size, nheads, dim)
+        for int16 state quantization with block scaling
     out : Optional[torch.Tensor]
         Optional output tensor (same shape as x)
     disable_state_update : bool
@@ -200,6 +208,10 @@ def selective_state_update(
             z = z.unsqueeze(1)
         if is_mtp and z.dim() == 3:
             z = z.unsqueeze(1)
+    # Normalize state_scale to 3D: (state_cache_size, nheads, dim)
+    if state_scale is not None and state_scale.dim() == 4 and state_scale.size(-1) == 1:
+        state_scale = state_scale.squeeze(-1)
+
     if out is None:
         output = torch.empty_like(x)
     else:
@@ -241,6 +253,7 @@ def selective_state_update(
         dt_softplus,
         state_batch_indices,
         pad_slot_id,
+        state_scale,
         output,
         disable_state_update,
         intermediate_states_buffer,
@@ -261,7 +274,7 @@ def selective_state_update(
 
 @register_custom_op(
     "flashinfer::selective_state_update",
-    mutates_args=("state", "output", "intermediate_states_buffer"),
+    mutates_args=("state", "output", "intermediate_states_buffer", "state_scale"),
 )
 def _selective_state_update(
     state: torch.Tensor,
@@ -276,6 +289,7 @@ def _selective_state_update(
     dt_softplus: bool,
     state_batch_indices: Optional[torch.Tensor],
     pad_slot_id: int,
+    state_scale: Optional[torch.Tensor],
     output: torch.Tensor,
     disable_state_update: bool,
     intermediate_states_buffer: Optional[torch.Tensor],
@@ -302,6 +316,7 @@ def _selective_state_update(
         dim,
         dstate,
         ntokens_mtp,
+        scale_state=state_scale is not None,
     ).selective_state_update(
         state,
         x,
@@ -315,6 +330,7 @@ def _selective_state_update(
         dt_softplus,
         state_batch_indices,
         pad_slot_id,
+        state_scale,
         output,
         disable_state_update,
         intermediate_states_buffer,
@@ -338,6 +354,7 @@ def _selective_state_update_fake(
     dt_softplus: bool,
     state_batch_indices: Optional[torch.Tensor],
     pad_slot_id: int,
+    state_scale: Optional[torch.Tensor],
     output: torch.Tensor,
     disable_state_update: bool,
     intermediate_states_buffer: Optional[torch.Tensor],

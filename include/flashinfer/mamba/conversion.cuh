@@ -35,6 +35,10 @@ inline __device__ void convertAndStore(__nv_bfloat16* output, float input) {
 #endif
 
 inline __device__ void convertAndStore(int16_t* output, float input) {
+  // Symmetric clip: [-max, max] (not [-max-1, max]) so that negation is safe.
+  // Matches Triton reference which clips to [-32767, 32767] before storing.
+  constexpr float int16_max = static_cast<float>(std::numeric_limits<int16_t>::max());
+  input = fminf(fmaxf(input, -int16_max), int16_max);
   *output = static_cast<int16_t>(__float2int_rn(input));
 }
 

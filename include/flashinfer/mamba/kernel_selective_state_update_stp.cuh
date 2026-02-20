@@ -57,12 +57,13 @@ __device__ __forceinline__ int conflict_free_column(int group, int baseCol) {
   return (baseCol + stateValuesPerBank * bankCycle) % colsPerStage;
 }
 
-template <typename input_t, int rows_per_block, int dstate>
+template <typename input_t, int rows_per_block, int dstate, bool scaleState>
 struct SharedStorageSimple {
   alignas(alignof(PackedAligned<input_t>)) input_t x[rows_per_block];
   alignas(alignof(PackedAligned<input_t>)) input_t z[rows_per_block];
   alignas(alignof(PackedAligned<input_t>)) input_t B[dstate];
   alignas(alignof(PackedAligned<input_t>)) input_t C[dstate];
+  alignas(alignof(PackedAligned<float>)) float state_scale[rows_per_block * scaleState];
   float out[rows_per_block];
 };
 
@@ -71,7 +72,8 @@ struct SharedStorageSimple {
 // Used when batch*nheads is too small to saturate the GPU: set ROWS_PER_BLOCK < DIM to
 // split dim across blocks for better occupancy.
 template <typename input_t, typename weight_t, typename matrixA_t, typename state_t,
-          typename stateIndex_t, int DIM, int DSTATE, int ROWS_PER_BLOCK, int numWarps>
+          typename stateIndex_t, int DIM, int DSTATE, int ROWS_PER_BLOCK, int numWarps,
+          bool scaleState = false>
 __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams params) {
   auto* __restrict__ output = reinterpret_cast<input_t*>(params.output);
   auto* __restrict__ state = reinterpret_cast<state_t*>(params.state);
@@ -88,6 +90,9 @@ __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams 
       reinterpret_cast<stateIndex_t const*>(params.state_batch_indices);
   bool const dt_softplus = params.dt_softplus;
 
+  // State scale pointer (only used when scaleState == true)
+  [[maybe_unused]] auto* __restrict__ state_scale = reinterpret_cast<float*>(params.state_scale);
+
   int const nheads = params.nheads;
   int const ngroups = params.ngroups;
 
@@ -102,8 +107,11 @@ __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams 
 
   auto const state_batch = (state_batch_indices) ? state_batch_indices[batch] : batch;
   state += state_batch * params.state_stride_batch + head * DIM * DSTATE;
+  if constexpr (scaleState) {
+    state_scale += state_batch * params.state_scale_stride_batch + head * DIM;
+  }
 
-  __shared__ SharedStorageSimple<input_t, ROWS_PER_BLOCK, DSTATE> sram;
+  __shared__ SharedStorageSimple<input_t, ROWS_PER_BLOCK, DSTATE, scaleState> sram;
 
   static constexpr auto stateLoadSize = getVectorLoadSizeForFullUtilization<state_t, DSTATE>();
   using load_state_t = PackedAligned<state_t, stateLoadSize>;
@@ -127,16 +135,28 @@ __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams 
       if (dim_offset + d < DIM)
         sram.x[d] = x[batch * params.x_stride_batch + head * DIM + dim_offset + d];
     }
+    if constexpr (scaleState) {
+      for (auto d = lane; d < ROWS_PER_BLOCK; d += warpSize) {
+        if (dim_offset + d < DIM) sram.state_scale[d] = state_scale[dim_offset + d];
+      }
+    }
+  } else if (warp == 1) {
     for (auto i = lane * load_input_t::count; i < DSTATE; i += warpSize * load_input_t::count) {
       auto* dst = reinterpret_cast<load_input_t*>(&sram.B[i]);
       *dst = *reinterpret_cast<load_input_t const*>(
           &B[batch * params.B_stride_batch + group * DSTATE + i]);
     }
-  } else if (warp == 1) {
-    for (auto d = lane; d < ROWS_PER_BLOCK; d += warpSize) {
-      if (dim_offset + d < DIM)
-        sram.z[d] = z ? z[batch * params.z_stride_batch + head * DIM + dim_offset + d] : input_t(0);
-    }
+  } else if (warp == 2) {
+    if (z)
+      for (auto d = lane; d < ROWS_PER_BLOCK; d += warpSize) {
+        if (dim_offset + d < DIM)
+          sram.z[d] = z[batch * params.z_stride_batch + head * DIM + dim_offset + d];
+      }
+    else
+      for (auto d = lane; d < ROWS_PER_BLOCK; d += warpSize) {
+        if (dim_offset + d < DIM) sram.z[d] = input_t(0);
+      }
+  } else if (warp == 3) {
     for (auto i = lane * load_input_t::count; i < DSTATE; i += warpSize * load_input_t::count) {
       auto* dst = reinterpret_cast<load_input_t*>(&sram.C[i]);
       *dst = *reinterpret_cast<load_input_t const*>(
@@ -150,32 +170,71 @@ __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams 
     if (d >= DIM) break;
 
     float x_value = toFloat(sram.x[_d]);
+    float state_scale_value = 1.f;
+    [[maybe_unused]] float new_state_max = std::numeric_limits<float>::lowest();
+    if constexpr (scaleState) {
+      state_scale_value = sram.state_scale[_d];
+    }
     float out_value = d_value * x_value * int(lane == 0);
 
-    for (int i = lane * load_state_t::count; i < DSTATE; i += warpSize * load_state_t::count) {
+    // When scaleState, keep new_state values in registers to avoid re-reading gmem
+    // and recomputing in the quantization pass. Each thread covers DSTATE/warpSize elements.
+    [[maybe_unused]] float
+        rNewState[DSTATE / warpSize * scaleState];  // just zero if we don't scale
+
+    // update the out value and compute the max state and state sum.
+    for (int iter = 0, i = lane * load_state_t::count; i < DSTATE;
+         iter++, i += warpSize * load_state_t::count) {
       auto rState = make_zeros<load_state_t>();
       if (state_batch != params.pad_slot_id)
         rState = *reinterpret_cast<load_state_t*>(&state[d * DSTATE + i]);
-
       for (int ii = 0; ii < load_state_t::count; ii++) {
-        auto state_value = toFloat(rState.val[ii]);
+        auto state_value = toFloat(rState.val[ii]) * state_scale_value;
         auto B_value = toFloat(sram.B[i + ii]);
         auto C_value = toFloat(sram.C[i + ii]);
 
         auto const dB = B_value * dt_value;
         auto const new_state = state_value * dA + dB * x_value;
-
-        convertAndStore(&rState.val[ii], new_state);
+        if constexpr (scaleState) {
+          new_state_max = fmaxf(new_state_max, fabsf(new_state));
+          rNewState[iter * load_state_t::count + ii] = new_state;
+        } else {
+          convertAndStore(&rState.val[ii], new_state);
+        }
 
         out_value += new_state * C_value;
       }
-      if (params.update_state && state_batch != params.pad_slot_id)
+      if (!scaleState && params.update_state && state_batch != params.pad_slot_id) {
         *reinterpret_cast<load_state_t*>(&state[d * DSTATE + i]) = rState;
+      }
     }
-
     out_value = warpReduceSum(out_value);
     if (lane == 0) {
       sram.out[_d] = out_value;
+    }
+
+    if constexpr (scaleState) {
+      if (params.update_state && state_batch != params.pad_slot_id) {
+        new_state_max = warpReduceMax(new_state_max);
+        new_state_max = __shfl_sync(UINT32_MAX, new_state_max, 0);  // broadcast to all lanes
+        float const encode_scale =
+            static_cast<float>(std::numeric_limits<state_t>::max()) / new_state_max;
+        float const decode_scale = 1.f / encode_scale;
+
+        for (int iter = 0, i = lane * load_state_t::count; i < DSTATE;
+             iter++, i += warpSize * load_state_t::count) {
+          auto rState = make_zeros<load_state_t>();
+          for (int ii = 0; ii < load_state_t::count; ii++) {
+            convertAndStore(&rState.val[ii],
+                            rNewState[iter * load_state_t::count + ii] * encode_scale);
+          }
+          *reinterpret_cast<load_state_t*>(&state[d * DSTATE + i]) = rState;
+        }
+
+        if (lane == 0) {
+          sram.state_scale[_d] = decode_scale;
+        }
+      }
     }
   }
 
@@ -193,6 +252,15 @@ __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams 
         out_value *= silu_z;
       }
       convertAndStore(&output[batch * params.out_stride_batch + head * DIM + d], out_value);
+    }
+  }
+  if (scaleState && params.update_state && state_batch != params.pad_slot_id) {
+    for (int l = lane; l < rowsPerWarp; l += warpSize) {
+      auto _d = warp * rowsPerWarp + l;
+      auto d = dim_offset + _d;
+      if (d < DIM) {
+        state_scale[d] = sram.state_scale[_d];
+      }
     }
   }
 }
@@ -959,14 +1027,14 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, SSUAlgorithm
       int const dim_tiles = (DIM + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
       dim3 grid(params.batch, params.nheads, dim_tiles);
       selective_state_update_kernel_simple<input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM,
-                                           DSTATE, ROWS_PER_BLOCK, numWarps>
+                                           DSTATE, ROWS_PER_BLOCK, numWarps, SCALE_STATE>
           <<<grid, block, 0, stream>>>(params);
     } else {
       // Non-tiled: enough blocks already for full occupancy; ROWS_PER_BLOCK == DIM so blockIdx.z ==
       // 0
       dim3 grid(params.batch, params.nheads);
       selective_state_update_kernel_simple<input_t, weight_t, matrixA_t, state_t, stateIndex_t, DIM,
-                                           DSTATE, DIM, numWarps>
+                                           DSTATE, DIM, numWarps, SCALE_STATE>
           <<<grid, block, 0, stream>>>(params);
     }
   }
