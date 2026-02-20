@@ -179,7 +179,7 @@ __global__ void selective_state_update_kernel_simple(SelectiveStateUpdateParams 
 
     // When scaleState, keep new_state values in registers to avoid re-reading gmem
     // and recomputing in the quantization pass. Each thread covers DSTATE/warpSize elements.
-    [[maybe_unused]] float rNewState[DSTATE / warpSize * scaleState];  // zero if we don't scale
+    [[maybe_unused]] float rNewState[scaleState ? DSTATE / warpSize : 1];
 
     // update the out value and compute the max state and state sum.
     for (int iter = 0, i = lane * load_state_t::count; i < DSTATE;
