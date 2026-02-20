@@ -1087,8 +1087,7 @@ void invokeSelectiveStateUpdate(SelectiveStateUpdateParams& params, SSUAlgorithm
     constexpr auto stateLoadSize = getVectorLoadSizeForFullUtilization<state_t, DSTATE>();
     using load_state_t = PackedAligned<state_t, stateLoadSize>;
 
-    FLASHINFER_CHECK(reinterpret_cast<uintptr_t>(params.state) % sizeof(load_state_t) == 0,
-                     "state pointer must be aligned to ", sizeof(load_state_t), " bytes");
+    FLASHINFER_CHECK_ALIGNMENT(params.state, sizeof(load_state_t));
     FLASHINFER_CHECK((params.dim * params.dstate * sizeof(state_t)) % sizeof(load_state_t) == 0,
                      "state head stride must be aligned to ", sizeof(load_state_t), " bytes");
 

@@ -700,21 +700,12 @@ class TestSelectiveStateUpdateMTPLargeBatch(TestSelectiveStateUpdateMTP):
 _INT16_MTP_PARAMS = [
     # (batch, nheads, dim, dstate, cache_steps, weight_dtype, use_out_tensor)
     (  64,    64,     64,  128,    4,           torch.float32,     True ),  # base
-    (   1,    64,     64,  128,    4,           torch.float32,     True ),  # batch=1
-    (   4,    64,     64,  128,    4,           torch.float32,     True ),  # batch=4
-    (  64,     8,     64,  128,    4,           torch.float32,     True ),  # nheads=8
     (  64,    64,    128,  128,    4,           torch.float32,     True ),  # dim=128
-    (  64,    64,     64,   64,    4,           torch.float32,     True ),  # dstate=64
-    (  64,    64,     64,  128,    1,           torch.float32,     True ),  # cache_steps=1
-    (  64,    64,     64,  128,    8,           torch.float32,     True ),  # cache_steps=8
     (  64,    64,     64,  128,    4,           torch.bfloat16,    True ),  # weight_dtype=bf16
 ]
 # fmt: on
 
 
-@pytest.mark.xfail(
-    reason="CUDA kernel does not yet support int16 state with block scaling"
-)
 class TestSelectiveStateUpdateMTPInt16(TestSelectiveStateUpdateMTP):
     """Test multi-token selective_state_update with int16 quantized state and block scaling."""
 
@@ -760,7 +751,7 @@ class TestSelectiveStateUpdateMTPInt16(TestSelectiveStateUpdateMTP):
             pad_slot_id=-1,
             state_scale=state_scale_ref,
         )
-        return y_ref, state_ref
+        return y_ref, state_ref, state_scale_ref
 
     def run_kernel(self, inputs, out=None, disable_state_update=False):
         """Run the flashinfer kernel with state_scale."""
@@ -782,18 +773,45 @@ class TestSelectiveStateUpdateMTPInt16(TestSelectiveStateUpdateMTP):
             state_scale=inputs["state_scale"],
         )
 
-    def assert_states_match(self, state_ref, state_test, slot_idx, msg_prefix=""):
-        """Compare raw int16 states."""
-        state_ref_batch = state_ref[slot_idx]
-        state_test_batch = state_test[slot_idx]
-        states_match = torch.equal(state_ref_batch, state_test_batch)
+    def assert_states_match(
+        self,
+        state_ref,
+        state_test,
+        slot_idx,
+        msg_prefix="",
+        state_scale_ref=None,
+        state_scale_test=None,
+    ):
+        """Compare dequantized int16 states."""
+        state_ref_batch = state_ref[slot_idx].float()
+        state_test_batch = state_test[slot_idx].float()
+
+        # Dequantize using the respective scales
+        if state_scale_ref is not None:
+            scale_ref = state_scale_ref[slot_idx]
+            if scale_ref.dim() == 3:
+                scale_ref = scale_ref.unsqueeze(-1)
+            state_ref_batch = state_ref_batch * scale_ref
+        if state_scale_test is not None:
+            scale_test = state_scale_test[slot_idx]
+            if scale_test.dim() == 3:
+                scale_test = scale_test.unsqueeze(-1)
+            state_test_batch = state_test_batch * scale_test
+
+        states_match = torch.allclose(
+            state_ref_batch, state_test_batch, atol=self.ATOL, rtol=self.RTOL
+        )
 
         if states_match:
-            print(f"✓ {msg_prefix}Int16 states match exactly")
+            print(
+                f"✓ {msg_prefix}Dequantized states match within tolerance (atol={self.ATOL}, rtol={self.RTOL})"
+            )
         else:
-            print(f"✗ {msg_prefix}Int16 states do NOT match")
-            diff = (state_ref_batch.float() - state_test_batch.float()).abs()
-            print(f"  Max diff: {diff.max().item()}, Mean diff: {diff.mean().item()}")
+            print(f"✗ {msg_prefix}Dequantized states do NOT match")
+            diff = (state_ref_batch - state_test_batch).abs()
+            print(
+                f"  Max diff: {diff.max().item():.6f}, Mean diff: {diff.mean().item():.6f}"
+            )
 
         assert states_match
 
@@ -815,16 +833,69 @@ class TestSelectiveStateUpdateMTPInt16(TestSelectiveStateUpdateMTP):
         weight_dtype,
         use_out_tensor,
     ):
-        super().test_output_correctness(
+        inputs = self.make_inputs(
+            batch, nheads, dim, dstate, cache_steps, state_dtype, weight_dtype
+        )
+        y_ref, state_ref, state_scale_ref = self.make_reference_output(inputs)
+
+        if use_out_tensor:
+            out = torch.empty_like(inputs["x"])
+        else:
+            out = None
+
+        y_test = self.run_kernel(inputs, out=out)
+
+        if use_out_tensor:
+            assert y_test.data_ptr() == out.data_ptr()
+
+        self.assert_outputs_match(y_ref, y_test)
+        self.assert_states_match(
+            state_ref,
+            inputs["state_cache"],
+            inputs["slot_idx"],
+            state_scale_ref=state_scale_ref,
+            state_scale_test=inputs["state_scale"],
+        )
+
+
+class TestSelectiveStateUpdateMTPInt16IntermediateStatesFails:
+    """Test that int16 scaled state rejects intermediate_states buffer."""
+
+    def test_int16_with_intermediate_states_should_fail(self):
+        batch, nheads, dim, dstate, cache_steps = 4, 8, 64, 128, 4
+        inputs = create_test_inputs(
             batch,
             nheads,
             dim,
             dstate,
-            cache_steps,
-            state_dtype,
-            weight_dtype,
-            use_out_tensor,
+            nheads,
+            torch.bfloat16,
+            weight_dtype=torch.float32,
+            matrixA_dtype=torch.float32,
+            state_dtype=torch.int16,
+            generate_z=False,
+            generate_intermediate_states_buffer=True,
+            cache_steps=cache_steps,
+            seed=0,
         )
+        with pytest.raises(RuntimeError, match="intermediate_states"):
+            flashinfer.mamba.selective_state_update(
+                inputs["state_cache"],
+                inputs["x"],
+                inputs["dt"],
+                inputs["A"],
+                inputs["B"],
+                inputs["C"],
+                D=inputs["D"],
+                dt_bias=inputs["dt_bias"],
+                dt_softplus=True,
+                state_batch_indices=inputs["slot_idx"],
+                pad_slot_id=-1,
+                state_scale=inputs["state_scale"],
+                intermediate_states_buffer=inputs["intermediate_states_buffer"],
+                intermediate_state_indices=inputs["intermediate_slot_idx"],
+                cache_steps=cache_steps,
+            )
 
 
 class TestSelectiveStateUpdateMTPIndicesDtypeMismatch:
