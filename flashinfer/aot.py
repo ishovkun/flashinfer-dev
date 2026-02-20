@@ -548,19 +548,7 @@ def gen_all_modules(
         ]
         # selective_state_update: one module per dtype combo per GPU arch
         _ssu_dtype_combos = [
-            # (state, input, weight, matrixA, stateIndex)
-            (
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.float32,
-                torch.int32,
-            ),
-            (torch.float16, torch.bfloat16, torch.bfloat16, torch.float32, torch.int32),
-            (torch.float32, torch.bfloat16, torch.bfloat16, torch.float32, torch.int32),
-            (torch.bfloat16, torch.bfloat16, torch.float32, torch.float32, torch.int32),
-            (torch.float16, torch.bfloat16, torch.float32, torch.float32, torch.int32),
-            (torch.float32, torch.bfloat16, torch.float32, torch.float32, torch.int32),
+            # (state,        input,          weight,         matrixA,      stateIndex)
             (
                 torch.bfloat16,
                 torch.bfloat16,
@@ -568,15 +556,11 @@ def gen_all_modules(
                 torch.float32,
                 torch.int64,
             ),
-            (torch.float16, torch.bfloat16, torch.bfloat16, torch.float32, torch.int64),
             (torch.float32, torch.bfloat16, torch.bfloat16, torch.float32, torch.int64),
-            (torch.bfloat16, torch.bfloat16, torch.float32, torch.float32, torch.int64),
-            (torch.float16, torch.bfloat16, torch.float32, torch.float32, torch.int64),
-            (torch.float32, torch.bfloat16, torch.float32, torch.float32, torch.int64),
         ]
-        _ssu_dims = [64, 128, 256]
-        _ssu_dstates = [64, 128, 256]
-        _ssu_ntokens = [1, 2, 4, 6, 8, 12, 16]
+        _ssu_dims = [64]
+        _ssu_dstates = [128]
+        _ssu_ntokens = [1, 4, 6, 8]
         for dtype_combo, dim, dstate, ntokens in product(
             _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
         ):
