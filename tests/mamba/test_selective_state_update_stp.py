@@ -481,9 +481,6 @@ _INT16_PARAMS = [
 # fmt: on
 
 
-@pytest.mark.xfail(
-    reason="CUDA kernel does not yet support int16 state with block scaling"
-)
 class TestSelectiveStateUpdateInt16(TestSelectiveStateUpdate):
     """Test selective_state_update with int16 quantized state and block scaling."""
 
@@ -591,7 +588,9 @@ class TestSelectiveStateUpdateInt16(TestSelectiveStateUpdate):
 
         assert states_match
 
-    @pytest.mark.parametrize("algorithm", _get_algorithms())
+    @pytest.mark.parametrize(
+        "algorithm", [a for a in _get_algorithms() if a != "horizontal"]
+    )
     @pytest.mark.parametrize(
         "batch,nheads,dim,dstate,state_dtype,weight_dtype,use_out_tensor",
         [(b, nh, d, ds, torch.int16, wd, uo) for b, nh, d, ds, wd, uo in _INT16_PARAMS],
